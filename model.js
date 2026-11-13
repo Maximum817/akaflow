@@ -1,4 +1,4 @@
-/* Original, unvalidated Bayesian baseline. See SCIENCE.md for assumptions. */
+/* Date, record, and evaluation adapter for the research model. See SCIENCE.md. */
 (function (root) {
   'use strict';
   const DAY = 86400000;
@@ -13,69 +13,7 @@
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
-  function logGamma(z) {
-    const p = [676.5203681218851, -1259.1392167224028, 771.3234287776531, -176.6150291621406, 12.507343278686905, -0.13857109526572012, 9.984369578019572e-6, 1.5056327351493116e-7];
-    if (z < .5) return Math.log(Math.PI) - Math.log(Math.sin(Math.PI * z)) - logGamma(1 - z);
-    z -= 1;
-    let x = .9999999999998099;
-    p.forEach((v, i) => { x += v / (z + i + 1); });
-    const t = z + p.length - .5;
-    return .5 * Math.log(2 * Math.PI) + (z + .5) * Math.log(t) - t + Math.log(x);
-  }
-  function betaFraction(a, b, x) {
-    const tiny = 1e-30;
-    let c = 1, d = 1 - (a + b) * x / (a + 1);
-    if (Math.abs(d) < tiny) d = tiny;
-    d = 1 / d;
-    let h = d;
-    for (let m = 1; m <= 300; m++) {
-      let aa = m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m));
-      d = 1 + aa * d; if (Math.abs(d) < tiny) d = tiny;
-      c = 1 + aa / c; if (Math.abs(c) < tiny) c = tiny;
-      d = 1 / d; h *= d * c;
-      aa = -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1));
-      d = 1 + aa * d; if (Math.abs(d) < tiny) d = tiny;
-      c = 1 + aa / c; if (Math.abs(c) < tiny) c = tiny;
-      d = 1 / d;
-      const delta = d * c; h *= delta;
-      if (Math.abs(delta - 1) < 3e-12) return h;
-    }
-    throw new Error('Prediction calculation did not converge.');
-  }
-  function betaI(x, a, b) {
-    if (x <= 0) return 0;
-    if (x >= 1) return 1;
-    const factor = Math.exp(logGamma(a + b) - logGamma(a) - logGamma(b) + a * Math.log(x) + b * Math.log1p(-x));
-    return x < (a + 1) / (a + b + 2) ? factor * betaFraction(a, b, x) / a : 1 - factor * betaFraction(b, a, 1 - x) / b;
-  }
-  function studentCDF(t, df) {
-    const v = .5 * betaI(df / (df + t * t), df / 2, .5);
-    return t >= 0 ? 1 - v : v;
-  }
-  function fit(lengths) {
-    if (!Array.isArray(lengths) || lengths.some(x => !Number.isInteger(x) || x < 1 || x > 3660)) throw new Error('Invalid cycle lengths.');
-    // All eligible completed cycles are used; no automatic outlier removal.
-    const n = lengths.length;
-    const mean = n ? lengths.reduce((a, b) => a + b, 0) / n : 29;
-    const ss = lengths.reduce((s, x) => s + (x - mean) ** 2, 0);
-    const k0 = .25, mu0 = 29, a0 = 2, b0 = 25;
-    const k = k0 + n, mu = (k0 * mu0 + n * mean) / k;
-    const alpha = a0 + n / 2;
-    const beta = b0 + ss / 2 + (k0 * n * (mean - mu0) ** 2) / (2 * k);
-    const scale = Math.sqrt(beta * (k + 1) / (alpha * k)), df = 2 * alpha;
-    // A continuous Student-t approximation discretized to positive calendar days.
-    // Conditioning on X >= 0.5 means rounding can never produce a zero-day cycle.
-    const lowerMass = studentCDF((.5 - mu) / scale, df);
-    const cdf = x => Math.max(0, Math.min(1, (studentCDF((x - mu) / scale, df) - lowerMass) / (1 - lowerMass)));
-    function quantile(p) {
-      let lo = .5, hi = Math.max(100, mu + scale * 10);
-      while (cdf(hi) < p) hi *= 2;
-      for (let i = 0; i < 70; i++) { const mid = (lo + hi) / 2; if (cdf(mid) < p) lo = mid; else hi = mid; }
-      return Math.max(1, Math.round((lo + hi) / 2));
-    }
-    return { n, mu, scale, df, cdf, quantile, median: quantile(.5), low: quantile(.1), high: quantile(.9),
-      probability: d => cdf(d + .5) - cdf(d - .5) };
-  }
+  const fit = lengths => CycleResearch.fit(lengths);
   function intervals(periods) {
     const sorted = [...periods].sort((a, b) => a.start.localeCompare(b.start));
     return sorted.slice(1).map((p, i) => ({ start: sorted[i].start, end: p.start, length: dayNumber(p.start) - dayNumber(sorted[i].start), excluded: p.excludePrevious === true }));
@@ -86,12 +24,14 @@
     if (context !== 'natural') return { available: false, reason: 'Predictions are paused for this tracking context. You can still keep your records.' };
     if (eligible.length < 3) return { available: false, reason: `Log at least 4 period starts to learn from 3 completed cycles. ${eligible.length} eligible cycles so far.` };
     const model = fit(eligible), last = sorted[sorted.length - 1].start;
+    if (!model.stable) return { available: false, reason: 'The numerical prediction is not stable enough for these records. Keep tracking and review incomplete intervals; no date is shown.', diagnostics: model.diagnostics };
     const elapsed = dayNumber(asOf) - dayNumber(last);
     return { available: true, ...model, start: addDays(last, model.median), earliest: addDays(last, model.low), latest: addDays(last, model.high), elapsed,
       pastWindow: elapsed > model.high, latestStart: last };
   }
   function backtest(periods) {
     const rows = intervals(periods), previous = [], results = [];
+    let skipped = 0;
     rows.forEach(row => {
       if (row.excluded) return;
       if (previous.length >= 3) {
@@ -99,13 +39,14 @@
         const baseline = [...previous].sort((a, b) => a - b);
         const mid = Math.floor(baseline.length / 2);
         const median = baseline.length % 2 ? baseline[mid] : (baseline[mid - 1] + baseline[mid]) / 2;
-        results.push({ actual: row.length, predicted: p.median, low: p.low, high: p.high, baseline: median });
+        if (p.stable) results.push({ actual: row.length, predicted: p.median, low: p.low, high: p.high, baseline: median });
+        else skipped++;
       }
       previous.push(row.length);
     });
-    if (!results.length) return null;
+    if (!results.length) return skipped ? { n: 0, skipped, results: [] } : null;
     const avg = f => results.reduce((s, r) => s + f(r), 0) / results.length;
-    return { n: results.length, mae: avg(r => Math.abs(r.actual - r.predicted)), baselineMAE: avg(r => Math.abs(r.actual - r.baseline)), coverage: avg(r => +(r.actual >= r.low && r.actual <= r.high)), results };
+    return { n: results.length, skipped, mae: avg(r => Math.abs(r.actual - r.predicted)), baselineMAE: avg(r => Math.abs(r.actual - r.baseline)), coverage: avg(r => +(r.actual >= r.low && r.actual <= r.high)), results };
   }
   const symptoms = ['Cramps', 'Headache', 'Bloating', 'Tender breasts', 'Fatigue', 'Acne'];
   function validate(data, asOf = today()) {
@@ -133,5 +74,5 @@
     });
     return { version: 1, context: data.context, periods, entries };
   }
-  root.CycleModel = { dayNumber, addDays, today, fit, forecast, backtest, intervals, validate, symptoms, studentCDF };
+  root.CycleModel = { dayNumber, addDays, today, fit, forecast, backtest, intervals, validate, symptoms };
 })(globalThis);

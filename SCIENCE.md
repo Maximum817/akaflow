@@ -1,78 +1,76 @@
-# Research, model specification, and validation status
+# Published-model implementation and its limits
 
-Research reviewed: 13 November 2026. Implementation: `model.js`, original Bayesian baseline v0.1. **Not clinically validated.**
+Version: `gp-skips-1`. Research and source reviewed 13 November 2026.
 
-## Recommended published model
+The Student-t / normal–inverse-gamma baseline has been removed from the prediction path. akaflow now implements the generalized-Poisson model with latent missed records described by [Urteaga et al., MLHC 2021](https://proceedings.mlr.press/v149/urteaga21a.html), building on [Li et al., JAMIA 2021](https://pubmed.ncbi.nlm.nih.gov/34534312/). [Reference code](https://github.com/iurteaga/menstrual_cycle_analysis), reviewed at revision `5f21f094dbdb9a6c302424b66a52b7c38e99f683`; MIT attribution is included in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-The strongest fit found for this use case is the hierarchical generalized-Poisson generative model in **Urteaga et al. (2021), “A Generative Modeling Approach to Calibrated Predictions: A Use Case on Menstrual Cycle Length Prediction,” MLHC / PMLR 149**. It represents individual timing, dispersion, and missed tracking, with predictive uncertainty. [Paper and supplement](https://proceedings.mlr.press/v149/urteaga21a.html); [authors' implementation](https://github.com/iurteaga/menstrual_cycle_analysis), distributed under MIT at the time of review.
+**This is an implementation of a published method, not the study's trained model and not a clinically validated product.** The reviewed repository supplies initialization defaults and training code. We found no released fitted population-parameter artifact there. No original participant dataset is loaded, trained on, or redistributed. Reference defaults must not be described as learned study parameters, and published accuracy must not be attributed to this app.
 
-This builds on **Li et al. (2021), “A predictive model for next cycle start date that accounts for adherence in menstrual self-tracking,” JAMIA 29(1)**. Their study used over two million tracked cycles from approximately 186,000 participants. Its important contribution for our design is separating physiology from logging adherence. [Primary paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC8714275/), DOI 10.1093/jamia/ocab182.
+## Probability model
 
-Research code is available, but a complete, trained, browser-ready clinical predictor is not established merely by finding its repository. This project does not contain their code, trained parameters, cohort data, or a reproduction of their results. No accuracy claims from either publication transfer to this baseline. Before integrating a port, audit code/license/dependencies, identify accessible consented data and population parameters, reproduce published evaluation, then independently validate the port.
-
-## Why this app does not predict a whole hormonal cycle
-
-**Bull et al. (2019)** analyzed 612,613 ovulatory cycles and documented substantial cycle and phase variability. These selected app users and detectable ovulatory cycles are not a representative sample of all people who menstruate. [Primary paper](https://www.nature.com/articles/s41746-019-0152-7), DOI 10.1038/s41746-019-0152-7. This is evidence against a fixed day-14 ovulation assumption, not a basis to infer a person's ovulation from dates.
-
-Period onset is the current prediction target. Bleeding days are only shown when recorded. Ovulation, fertile windows, phase assignments, hormone trajectories, and symptom forecasts are not generated. BBT, LH, and cervical mucus would require separate validated observation models and appropriate reference labels; they must not be turned into improvised fertility advice. [ACOG guidance](https://www.acog.org/womens-health/faqs/fertility-awareness-based-methods-of-family-planning).
-
-## Implemented algorithm: original conjugate Bayesian baseline
-
-Let `x_i` be eligible, completed, whole-day intervals between chronologically consecutive period starts. The initial model assumes:
+A person's parameters are `θ = (λ, ξ, π)`. The reference priors used here are:
 
 ```text
-x_i | μ, σ² ~ Normal(μ, σ²)
-μ | σ²      ~ Normal(μ₀, σ² / κ₀)
-σ²          ~ InverseGamma(α₀, β₀)  [scale parameter β₀]
-
-μ₀ = 29 days, κ₀ = 0.25, α₀ = 2, β₀ = 25 days²
+λ ~ Gamma(shape=30, rate=1)
+ξ = 2 U − 1,  U ~ Beta(1,1)
+π ~ Beta(2,20)
 ```
 
-These hyperparameters are transparent **engineering choices**, not population parameters learned in the cited research. The 29-day center is broadly compatible with the adult app-cohort literature, but not a universal physiological norm. Small κ gives the prior center little weight. The variance prior intentionally leaves initial uncertainty. No forecast is shown with fewer than three eligible completed intervals; this threshold is also an engineering choice, not a validated minimum.
+These numbers come from the reference configuration file, not an inference about population physiology. For `ξ`, we follow the reference implementation's `draw_params` shift over `(-1,1)`, with intrinsic finite support when negative. We do not use the paper's optional user-chosen finite-xmax parameter constraint.
 
-For `n` eligible intervals, sample mean `x̄`, and `S = Σ(x_i − x̄)²`:
+For a non-negative integer `x`:
 
 ```text
-κₙ = κ₀ + n
-μₙ = (κ₀ μ₀ + n x̄) / κₙ
-αₙ = α₀ + n / 2
-βₙ = β₀ + S/2 + κ₀ n (x̄ − μ₀)² / (2κₙ)
-
-X_next | history ~ StudentT(
-  degrees_of_freedom = 2αₙ,
-  location = μₙ,
-  scale = sqrt[βₙ (κₙ + 1) / (αₙ κₙ)]
-)
+GP(x | λ, ξ) = λ (λ + ξx)^(x−1) exp(−λ−ξx) / x!
+GP(0 | λ, ξ) = exp(−λ)
 ```
 
-The likelihood is a continuous approximation to count data. For usable positive calendar predictions, the predictive distribution is truncated below 0.5 days, then rounded to integer days. For its untruncated CDF `F`, the truncated CDF is `(F(x) − F(0.5)) / (1 − F(0.5))` for `x ≥ 0.5`. Daily probability is the mass between `d − 0.5` and `d + 0.5`. The integer median minimizes absolute error for this discretized distribution; its rounded 10th and 90th percentiles define the displayed nominal 80% interval. Rounding may make interval mass exceed 80%.
+For negative `ξ`, valid integers end at `ceil(−λ/ξ)−1`. Probabilities are zero outside that support and are divided by their finite sum `Z(λ,ξ)`. For non-negative `ξ < 1`, `Z=1`.
 
-The Student-t CDF is calculated through a regularized incomplete beta continued fraction; quantiles use bisection. No random simulation, API, or LLM is used. All eligible historical intervals are used without recency weighting or automatic outlier filtering. A later iteration should compare nonstationary approaches; this baseline assumes exchangeable observations and may respond poorly to changes over time, asymmetry, and multimodal patterns.
+An observed interval can contain `s` unreported period starts:
 
-The model learns a distribution for timing, not a mechanistic model of reproductive physiology. A wider interval is expected with greater observed variability, and parameter uncertainty decreases with more consistent observations. Real-world coverage may still be badly miscalibrated.
+```text
+s ∈ {0, …, 10}
+q(s | π) = (1−π) π^s / (1−π^11)
+p(x | θ) = Σ_s q(s | π) GP(x | (s+1)λ, ξ) / Z((s+1)λ,ξ)
+p(θ | history) ∝ p(θ) ∏_i p(x_i | θ)
+```
 
-## Missing records and context
+The skip range is **inclusive**, following the paper's finite geometric sum. The reviewed Python helper uses a half-open range with a denominator referring to an inclusive count; we do not reproduce that off-by-one discrepancy. This port is equation-compatible with the stated sum, not a bit-for-bit translation of every reference-code behavior.
 
-- No latent skipped-cycle model is implemented. A 56-day interval is treated as 56 days unless the user explicitly excludes it; the app does not assume two 28-day cycles.
-- The exclusion flag belongs to the period start **ending** an interval. Deleting a middle period creates a merged interval, which is automatically excluded pending review.
-- Forecasts remain anchored to the latest recorded start. Passing the original upper bound prompts record review, rather than conditioning on a potentially missing entry and repeatedly postponing a date.
-- Predictions pause outside the selected adult natural-cycle context. Selecting that context is not evidence of model suitability. No validation has been performed for PCOS, perimenopause, adolescents, postpartum, hormonal contraception, pregnancy, or treatment changes. Context is global; historical intervals must be reviewed after a change.
-- Valid past dates, unique starts, nonoverlapping recorded bleeding intervals, and bounded backup sizes are enforced. Recorded periods lasting longer than 61 days or gaps longer than 3,660 days are outside the storage validation contract, not diagnostic thresholds.
-- Daily symptom/mood/notes data has no effect on the timing model. No causal or phase-based interpretation is made.
+## Prediction target and product policy
 
-## What the app's retrospective check measures
+We predict **one next biological cycle**, corresponding to the reference predictor's `s_predict=0` setting. Historical latent skips are still marginalized when learning the posterior. This target differs from the date of a future *reported* onset if a user again forgets to log. We do not display that potentially multi-cycle reporting delay as a biological period forecast.
 
-Starting after three eligible completed intervals, predict the next eligible interval using only earlier eligible intervals. Repeat chronologically. Report mean absolute error, empirical coverage of the nominal 80% interval, and a historical-median baseline's error on identical held-out intervals. Exclusions are respected. No future observations enter past predictions.
+The next-cycle distribution integrates `GP(d | λ,ξ)/Z(λ,ξ)` against the parameter posterior. The app conditions on a positive integer day. The median and integer 10th/90th percentiles yield the point date and nominal 80% range. Discrete endpoint inclusion can make enclosed mass larger than 80%. Real-world coverage is unestablished.
 
-This is exploratory personal backtesting. It is neither an independent test cohort nor prospective validation. Users can edit exclusions after observing outcomes, creating selection bias. Few recorded cycles give unstable error and coverage estimates. Demo results are synthetic and have no evidentiary value.
+At least three eligible completed intervals are required; this is an engineering threshold, not a validated minimum. All eligible intervals are used. The app does not automatically delete long cycles, divide a long gap, or add inferred period starts. Users can explicitly exclude incomplete intervals.
 
-## Required before evidence-backed accuracy claims
+We keep the forecast anchored to the latest recorded onset. Passing its upper bound prompts review rather than silently shifting the window. Although the research includes day-conditioned reporting predictions, that optional feature is not used here: absent logs do not establish that bleeding has not occurred.
 
-1. Obtain a lawful, consented, representative dataset with provenance and appropriate governance. Public research code does not confer access to the original health records.
-2. Pre-register intended users, prediction targets, exclusion/missingness rules, prior selection, and performance criteria.
-3. Use participant-disjoint development and external test cohorts plus chronological evaluation within each test participant. Fit any population parameters and preprocessing on development data only.
-4. Compare historical median, recent mean, this baseline, and the authors' generalized-Poisson approach. Include MAE, median absolute error, negative log likelihood or proper scoring rules, 50/80/95% interval coverage, and interval widths.
-5. Report cold-start performance, missed-log behavior, irregular cycles, changing cycles, dropout, and subgroup uncertainty. Calibrate only on separate validation data, without tuning on the test cohort.
-6. Conduct prospective independent evaluation against actual recorded onset dates and appropriate physiological reference measurements for any later ovulation feature. Have qualified clinical and regulatory review of the proposed claims before medical deployment.
+## Numerical implementation
 
-The delivered app is a working foundation for that process, not its completion.
+- Start with 32,768 reproducible pseudorandom prior draws and self-normalized importance weights. Compute history likelihoods in log space, with repeated lengths counted in a histogram.
+- If numerical checks fail, use 65,536 draws from a defensive proposal: half reference prior, half a data-centered conditional Gamma proposal for `λ`, given `ξ`. Its center uses the **current input history only**. The `ξ` and `π` priors stay the same. We apply the exact `p(θ)/q(θ)` density correction, so this proposal changes sampling efficiency rather than the target model.
+- Negative-dispersion normalization sums finite support, stopping at `mean + 16·sd + 40` only when support extends further. This is a numerical tail approximation, checked against exhaustive-support fixtures.
+- Positive predictive mass is accumulated to at least 120 days and until omitted mass is below `10^-5`, with an absolute numerical horizon of 3,660 days. Forecasts require at least 99.9% retained positive mass.
+- Withhold forecasts unless effective sample size is at least 128 overall and 40 in each half, and maximum CDF disagreement between independently generated sample halves is at most 0.05. These are engineering safeguards, not guarantees of posterior or clinical correctness.
+- Seed `20261113` identifies the first draw; the adaptive proposal uses the next seed. A bounded likelihood cache and 24-result cache are kept in worker memory only. Changing records terminates stale workers; old results cannot overwrite new requests.
+
+The model runs in `prediction-worker.js`; no prediction service, tracking endpoint, or population training server is contacted. Existing record storage and backup schema remain compatible. Calculation failures withhold dates while preserving records.
+
+## Verification and evaluation
+
+`verify-reference.py` independently generates committed fixtures using Python's `math.lgamma` and exhaustive finite-support sums. JavaScript tests compare GP kernels, posterior weights, and predictive probability mass against those fixtures, including negative dispersion and double-length gaps. They also check the Poisson special case, normalized skip probabilities, zero outside support, positive-day output, importance-density correction, adaptive sampling, withheld unstable predictions, exclusions, contexts, record validation, and chronological evaluation.
+
+This checks numerical and integration behavior, not real-world accuracy. It is not a reproduction of a trained research cohort evaluation. No simulated result is represented as clinical evidence.
+
+Personal backtesting predicts each eligible held-out interval from earlier eligible intervals, compares with a historical median, and includes **only numerically stable** forecasts in reported errors and coverage. Therefore coverage/error are conditional on the model returning a forecast. Skipped numerical predictions are reported separately. A participant's post-hoc editing/exclusion choices may still bias results.
+
+Before making accuracy claims, obtain an appropriately consented representative dataset; learn population parameters on development participants; evaluate on separate participants chronologically; assess error, probability scores, interval coverage/width, and forecast availability by subgroup; and perform independent prospective validation. New cohort-fitted parameters must carry provenance and replace the reference-default label.
+
+## Scope
+
+Adult natural-cycle tracking only. Predictions pause in other selected contexts. This port has not been validated for adolescents, pregnancy, postpartum, hormonal contraception, PCOS, perimenopause, treatment changes, or fertility decisions. Symptoms are recorded but are not predictor inputs. Period dates do not confirm ovulation, hormone levels, or fertility. [ACOG guidance](https://www.acog.org/womens-health/faqs/fertility-awareness-based-methods-of-family-planning).
+
+Do not use this app for contraception, ovulation confirmation, or diagnosis.
