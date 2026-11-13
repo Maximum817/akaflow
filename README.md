@@ -2,9 +2,9 @@
 
 A responsive, browser-only cycle tracker prepared for GitHub Pages. No package install, build step, backend, API key, or external font is required.
 
-Features: period logging and editing, daily symptoms/mood/notes, calendar, original Bayesian next-period baseline, model prediction ranges, chronological personal backtesting against a historical median, explicit interval exclusion, tracking contexts, sample mode, and JSON backup/restore.
+Features: period logging and editing, daily symptoms/mood/notes, calendar, published generalized-Poisson next-period model with missed-record inference, model prediction ranges, chronological personal backtesting against a historical median, explicit interval exclusion, tracking contexts, sample mode, and JSON backup/restore.
 
-**This is an unvalidated tracking prototype.** It does not predict ovulation, fertility, hormone levels, or pregnancy, and must not be used as contraception or diagnosis. The baseline is science-informed; its clinical accuracy has not been established. See [the research and algorithm specification](SCIENCE.md).
+**This is an unvalidated tracking prototype.** It does not predict ovulation, fertility, hormone levels, or pregnancy, and must not be used as contraception or diagnosis. The prediction algorithm is a browser adaptation of Urteaga et al. (MLHC 2021), using the authors’ reference defaults rather than fitted study-cohort parameters. Its clinical accuracy has not been established. See [the research and algorithm specification](SCIENCE.md).
 
 ## Run locally
 
@@ -40,6 +40,7 @@ Repository: [Maximum817/akaflow](https://github.com/Maximum817/akaflow). Public 
 ```sh
 node model.test.js
 node --check app.js
+node --check prediction-worker.js
 ```
 
 On a Mac without Node, run the same dependency-free model assertions with JavaScriptCore from the repository root:
@@ -48,4 +49,11 @@ On a Mac without Node, run the same dependency-free model assertions with JavaSc
 /System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc model.test.js
 ```
 
-Tests cover reference Student-t probabilities, posterior parameters, normalized positive daily probabilities, uncertainty behavior, calendar boundaries, date/backup validation, context gating, exclusions, stale forecasts, and no future leakage in backtesting. Mathematical tests do not establish real-world clinical accuracy.
+Tests compare generalized-Poisson kernels, posterior weights, and predictive distributions with independent Python fixtures, and check positive daily probabilities, numerical stability gating, calendar boundaries, backup validation, contexts, exclusions, stale forecasts, and no future leakage in backtesting. Regenerate the fixtures with `python3 verify-reference.py`. Mathematical tests do not establish real-world clinical accuracy.
+
+
+## Prediction implementation
+
+`research-model.js` contains the generalized-Poisson / missed-record likelihood and importance sampling. `model.js` adapts records and evaluates chronological predictions. `prediction-worker.js` runs the model off the main thread; `app.js` discards stale requests when records change. Cached likelihoods stay only in worker memory. No health data is sent to a server.
+
+See [SCIENCE.md](SCIENCE.md) for the exact parameterization, numerical safeguards, and differences from the study; [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) includes the research code's MIT notice.

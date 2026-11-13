@@ -3,6 +3,7 @@
   const M = CycleModel, $ = id => document.getElementById(id), KEY = 'akaflo.records.v1';
   const blank = () => ({ version: 1, context: 'natural', periods: [], entries: [] });
   let state = blank(), demo = false, editingStart = null, toastTimer;
+  let worker = null, requestId = 0, predictionKey = '', forecastResult = null, backtestResult = undefined, workerError = '';
   let month = M.today().slice(0, 7) + '-01';
   const text = (id, value) => { $(id).textContent = value; };
   function format(iso, options = { month: 'short', day: 'numeric' }) {
@@ -45,8 +46,41 @@
       if (active) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     });
   }
+  function requestPredictions() {
+    const key = JSON.stringify([state.periods, state.context, M.today()]);
+    if (key === predictionKey) return;
+    predictionKey = key;
+    forecastResult = null; backtestResult = undefined; workerError = '';
+    // Stop stale work after record edits rather than queueing old health histories.
+    if (worker) worker.terminate();
+    const id = ++requestId;
+    try {
+      worker = new Worker('./prediction-worker.js');
+      worker.onmessage = event => {
+        if (event.data.id !== requestId) return;
+        if (event.data.type === 'forecast') forecastResult = event.data.forecast;
+        else if (event.data.type === 'backtest') backtestResult = event.data.backtest;
+        else { workerError = event.data.message; if (!forecastResult) forecastResult = {available:false,reason:'Unable to calculate a stable prediction. Your records are still saved.'}; }
+        render();
+      };
+      worker.onerror = () => {
+        if (id !== requestId) return;
+        workerError = 'Prediction worker unavailable.';
+        forecastResult = {available:false,reason:'Your browser could not start the prediction calculation. Your records are still saved.'};
+        render();
+      };
+      worker.postMessage({ id, state, asOf: M.today() });
+    } catch (_) {
+      workerError = 'Prediction worker unavailable.';
+      forecastResult = {available:false,reason:'Your browser could not start the prediction calculation. Your records are still saved.'};
+    }
+  }
+  function currentForecast() {
+    return forecastResult || {available:false,reason:'Calculating your personal prediction on this device…'};
+  }
   function render() {
-    const now = M.today(), f = M.forecast(state.periods, state.context, now);
+    requestPredictions();
+    const now = M.today(), f = currentForecast();
     const last = state.periods.at(-1);
     text('today-date', format(now, { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase());
     $('demo-banner').hidden = !demo;
@@ -66,7 +100,7 @@
     $('forecast-summary').hidden = !f.available; $('forecast-empty').hidden = f.available;
     if (f.available) {
       text('prediction-heading', f.pastWindow ? 'Time for a record check.' : 'A little look ahead.');
-      text('prediction-description', f.pastWindow ? "This estimate has passed. Check for a missing period entry. We haven't shifted your prediction or assumed why your cycle changed." : `Learning from ${f.n} completed cycles. Your dates can vary, and that's reflected in the range.`);
+      text('prediction-description', f.pastWindow ? "This estimate has passed. Check for a missing period entry. We haven't shifted your prediction or assumed why your cycle changed." : `Using ${f.n} recorded intervals, with missed entries considered probabilistically. Research model · reference priors.`);
       text('forecast-date', format(f.start, { day: 'numeric', month: 'long' }));
       text('forecast-range', format(f.earliest) + ' – ' + format(f.latest) + (f.pastWindow ? ' · original estimate' : ' · estimated range'));
       renderDistribution(f);
@@ -77,10 +111,11 @@
     renderCalendar(f); renderHistory(); renderInsights(); route();
   }
   function renderDistribution(f) {
+    const cdf = x => x < 1 ? 0 : x >= f.cumulative.length - 1 ? 1 : f.cumulative[Math.floor(x)];
     const start = Math.max(1, f.low - 4), end = f.high + 4;
     const step = Math.max(1, Math.ceil((end - start) / 45));
     const points = [];
-    for (let d = start; d <= end; d += step) points.push({ d, p: f.cdf(d + step / 2) - f.cdf(Math.max(.5, d - step / 2)) });
+    for (let d = start; d <= end; d += step) points.push({ d, p: cdf(d + step / 2) - cdf(Math.max(0, d - step / 2)) });
     const max = Math.max(...points.map(p => p.p));
     $('mini-chart').replaceChildren(...points.map(({ d, p }) => {
       const bar = element('i', d >= f.low && d <= f.high ? 'central' : '');
@@ -135,14 +170,14 @@
       const track = element('div', 'bar-track'), bar = element('i'); bar.style.width = i.length / max * 100 + '%'; track.append(bar);
       row.append(element('span', '', format(i.start)), track, element('span', '', i.length + ' days' + (i.excluded ? ' *' : ''))); return row;
     }) : [element('p', 'muted', 'Log two period starts to see a completed cycle.')]));
-    const b = M.backtest(state.periods);
-    if (b) {
+    const b = backtestResult;
+    if (b && b.n > 0) {
       const stats = element('div', 'backtest-stats');
       for (const [value, label] of [[b.mae.toFixed(1) + ' days', 'Model mean absolute error'], [b.baselineMAE.toFixed(1) + ' days', 'Historical median error'], [Math.round(b.coverage * 100) + '%', 'Observed range coverage']]) {
         const part = element('div'); part.append(element('strong', '', value), element('span', '', label)); stats.append(part);
       }
-      $('backtest').replaceChildren(element('p', 'muted', `${b.n} held-out cycle${b.n === 1 ? '' : 's'} tested${demo ? ' · sample data only' : ''}. No future cycles were used to make each prediction.`), stats);
-    } else $('backtest').replaceChildren(element('p', 'muted', 'At least 5 period starts (4 eligible cycles) are needed for the first retrospective prediction check.'));
+      $('backtest').replaceChildren(element('p', 'muted', `${b.n} held-out cycle${b.n === 1 ? '' : 's'} tested${demo ? ' · sample data only' : ''}. ${b.skipped} checks withheld for numerical instability. No future cycles were used to make each prediction.`), stats);
+    } else $('backtest').replaceChildren(element('p', 'muted', b === undefined ? (workerError ? 'Prediction evaluation is unavailable.' : 'Checking past predictions on this device…') : 'No stable held-out predictions yet. At least 5 period starts are needed for the first check.'));
     const counts = M.symptoms.map(s => [s, state.entries.filter(e => e.symptoms.includes(s)).length]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]);
     $('symptom-summary').replaceChildren(...(counts.length ? counts.map(([s, n]) => { const row = element('div', 'history-row'); row.append(element('span', '', s), element('span', '', `${n} check-in${n === 1 ? '' : 's'}`)); return row; }) : [element('p', 'muted', 'Your check-ins will appear here as you add them.')]));
   }
@@ -244,10 +279,10 @@
   });
   function shiftMonth(delta) {
     const d = new Date(month + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() + delta); month = d.toISOString().slice(0, 10);
-    renderCalendar(M.forecast(state.periods, state.context));
+    renderCalendar(currentForecast());
   }
   $('month-prev').addEventListener('click', () => shiftMonth(-1)); $('month-next').addEventListener('click', () => shiftMonth(1));
-  $('month-today').addEventListener('click', () => { month = M.today().slice(0, 7) + '-01'; renderCalendar(M.forecast(state.periods, state.context)); });
+  $('month-today').addEventListener('click', () => { month = M.today().slice(0, 7) + '-01'; renderCalendar(currentForecast()); });
   window.addEventListener('hashchange', route);
   window.addEventListener('storage', e => { if (e.key === KEY && !demo) { load(); render(); notify('Records updated from another tab.'); } });
   window.addEventListener('pageshow', () => { render(); });

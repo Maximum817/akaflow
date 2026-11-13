@@ -18,8 +18,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - run: python3 verify-reference.py
       - run: node model.test.js
       - run: node --check app.js
+      - run: node --check prediction-worker.js
   deploy:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: test
@@ -37,7 +39,7 @@ jobs:
         run: |
           mkdir -p _site
           cp index.html _site/
-          cp model.js app.js style.css icon.svg _site/
+          cp model.js research-model.js prediction-worker.js app.js style.css icon.svg THIRD_PARTY_NOTICES.md _site/
           touch _site/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
