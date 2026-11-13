@@ -1,0 +1,5 @@
+.DS_Store
+_site/
+*.backup.json
+akaflo-*.json
+__pycache__/
